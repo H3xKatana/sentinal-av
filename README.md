@@ -19,7 +19,7 @@ This system follows a client-server architecture with lightweight agents:
 
 ### Central Server
 - **Web UI**: Built with React.js and Flask
-- **API Server**: Python Flask/FastAPI with REST endpoints
+- **AGENT**: Python Flask/FastAPI with REST endpoints
 - **Database**: PostgreSQL for storing scan results, threats, and configurations
 - **Definition Manager**: Service for updating and distributing virus signatures
 - **Task Scheduler**: Celery with Redis for managing scan jobs
