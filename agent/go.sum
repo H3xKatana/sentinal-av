@@ -1,0 +1,4 @@
+github.com/hillu/go-yara/v4 v4.3.4 h1:llJ9e0hQ1Cxyw5jH8O/a61qIBZCYCS45298MvYTf1fw=
+github.com/hillu/go-yara/v4 v4.3.4/go.mod h1:/mb2HtBQf80I3JNL13tO5pt0w+3oR35EMc76OVjBYZU=
+github.com/joho/godotenv v1.5.1 h1:7eLL/+HRGLY0ldzfGMeQkb7vMd0as4CfYvUVzLqw0N0=
+github.com/joho/godotenv v1.5.1/go.mod h1:f4LDr5Voq0i2e/R5DDNOoa2zzDfwtkZa6DnEwAbqwq4=
