@@ -1,40 +1,12 @@
 services:
-  postgres:
-    image: postgres:15-alpine
-    container_name: sentinel-postgres
-    restart: unless-stopped
-    environment:
-      POSTGRES_DB: ${DB_NAME:-sentinel_av}
-      POSTGRES_USER: ${DB_USER:-sentinel}
-      POSTGRES_PASSWORD: ${DB_PASSWORD:-sentinel}
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-    ports:
-      - "5432:5432"
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-sentinel}"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-    networks:
-      - sentinel-net
-
   server:
     build:
       context: ./server
       dockerfile: Dockerfile
     container_name: sentinel-server
     restart: unless-stopped
-    depends_on:
-      postgres:
-        condition: service_healthy
     environment:
-      DB_HOST: ${DB_HOST:-postgres}
-      DB_PORT: ${DB_PORT:-5432}
-      DB_USER: ${DB_USER:-sentinel}
-      DB_PASSWORD: ${DB_PASSWORD:-sentinel}
-      DB_NAME: ${DB_NAME:-sentinel_av}
-      DB_SSLMODE: ${DB_SSLMODE:-disable}
+      DB_PATH: /data/sentinel.db
       HTTP_PORT: ${HTTP_PORT:-3000}
       GRPC_PORT: ${GRPC_PORT:-50051}
       JWT_SECRET: ${JWT_SECRET:-your-super-secret-jwt-key-change-this-in-production}
@@ -42,6 +14,8 @@ services:
     ports:
       - "${HTTP_PORT:-3000}:3000"
       - "${GRPC_PORT:-50051}:50051"
+    volumes:
+      - sentinel-data:/data
     networks:
       - sentinel-net
     healthcheck:
@@ -72,7 +46,7 @@ services:
     depends_on:
       - server
     environment:
-      NEXT_PUBLIC_API_URL: http://localhost:3000
+      NEXT_PUBLIC_API_URL: http://server:3000
     ports:
       - "8080:3000"
     networks:
@@ -85,15 +59,42 @@ services:
           "--quiet",
           "--tries=1",
           "--spider",
-          "http://localhost:3000",
+          "http://server:3000",
         ]
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 60s
 
+  agent:
+    build:
+      context: ./agent
+      dockerfile: Dockerfile
+    container_name: sentinel-agent
+    restart: unless-stopped
+    depends_on:
+      - server
+    environment:
+      VT_KEY: ${VT_KEY}
+      SERVER_URL: http://server:3000
+      SCAN_PATH: ${AGENT_SCAN_PATH:-/tmp}
+    volumes:
+      - ./agent-data:/agent-data
+    networks:
+      - sentinel-net
+    command: >
+      sh -c "
+        ./sentinel-agent -path ${AGENT_SCAN_PATH:-/tmp} -monitor
+      "
+    healthcheck:
+      test: ["CMD", "pgrep", "sentinel-agent"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
 volumes:
-  postgres_data:
+  sentinel-data:
 
 networks:
   sentinel-net:

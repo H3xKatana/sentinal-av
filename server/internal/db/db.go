@@ -6,7 +6,7 @@ import (
 
 	"github.com/0xA1M/sentinel-server/internal/api/utils"
 	"github.com/0xA1M/sentinel-server/internal/db/migrations"
-	"gorm.io/driver/postgres"
+	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 )
 
@@ -15,22 +15,29 @@ var DB *gorm.DB
 
 // Connect initializes the database connection
 func Connect() (*gorm.DB, error) {
-	dsn := fmt.Sprintf("host=%s user=%s password=%s dbname=%s port=%s sslmode=%s TimeZone=%s",
-		getEnv("DB_HOST", "localhost"),
-		getEnv("DB_USER", "sentinel"),
-		getEnv("DB_PASSWORD", "sentinel"),
-		getEnv("DB_NAME", "sentinel_av"),
-		getEnv("DB_PORT", "5432"),
-		getEnv("DB_SSLMODE", "disable"),
-		getEnv("DB_TIMEZONE", "UTC"),
-	)
+	// Use SQLite database file
+	dbPath := getEnv("DB_PATH", "./sentinel.db")
 
-	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{
+	// Configure SQLite with proper options for concurrent access
+	dsn := fmt.Sprintf("%s?_busy_timeout=10000&_journal_mode=WAL&_foreign_keys=on", dbPath)
+
+	db, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{
 		Logger: utils.GetGormLogger(),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to database: %v", err)
 	}
+
+	// Set connection pool settings for SQLite
+	sqlDB, err := db.DB()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get database instance: %v", err)
+	}
+
+	// Configure connection pool
+	sqlDB.SetMaxOpenConns(25) // SQLite works better with fewer connections
+	sqlDB.SetMaxIdleConns(25)
+	sqlDB.SetConnMaxLifetime(0) // SQLite connections can be long-lived
 
 	DB = db
 	return db, nil

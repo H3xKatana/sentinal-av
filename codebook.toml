@@ -10,6 +10,7 @@ words = [
     "ips",
     "liveness",
     "nosniff",
+    "sslmode",
     "submatch",
     "subrouter",
     "syncsvc",

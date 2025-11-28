@@ -202,6 +202,71 @@ func (s *Service) ChangePassword(userID uint, oldPassword, newPassword string) e
 	return nil
 }
 
+// AgentClaims represents JWT claims for agents
+type AgentClaims struct {
+	AgentID string `json:"agent_id"`
+	jwt.RegisteredClaims
+}
+
+// GenerateAgentToken generates a JWT token for an agent
+func (s *Service) GenerateAgentToken(agentID string) (string, error) {
+	// Define the token expiration time (7 days for agents)
+	expirationTime := time.Now().Add(7 * 24 * time.Hour)
+
+	// Create the JWT claims
+	claims := &AgentClaims{
+		AgentID: agentID,
+		RegisteredClaims: jwt.RegisteredClaims{
+			ExpiresAt: jwt.NewNumericDate(expirationTime),
+			IssuedAt:  jwt.NewNumericDate(time.Now()),
+			Issuer:    "sentinel-server",
+		},
+	}
+
+	// Create the token with signing method and claims
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+
+	// Get the secret key from environment variable
+	secret := os.Getenv("JWT_SECRET")
+	if secret == "" {
+		secret = "default_secret_for_dev" // fallback for development
+		log.Println("Warning: Using default JWT secret. Set JWT_SECRET environment variable for production.")
+	}
+
+	// Sign and return the token
+	return token.SignedString([]byte(secret))
+}
+
+// ParseAgentToken validates an agent JWT token and returns the agent ID
+func (s *Service) ParseAgentToken(tokenString string) (jwt.MapClaims, error) {
+	// Parse the token
+	token, err := jwt.Parse(tokenString, func(token *jwt.Token) (any, error) {
+		// Validate the signing method
+		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+			return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
+		}
+
+		// Get the secret key from environment variable
+		secret := os.Getenv("JWT_SECRET")
+		if secret == "" {
+			secret = "default_secret_for_dev" // fallback for development
+		}
+
+		return []byte(secret), nil
+	})
+
+	if err != nil {
+		return nil, err
+	}
+
+	// Validate the token and extract claims
+	if claims, ok := token.Claims.(jwt.MapClaims); ok && token.Valid {
+		return claims, nil
+	}
+
+	return nil, errors.New("invalid token")
+}
+
 // RefreshToken generates a new token with extended validity
 func (s *Service) RefreshToken(tokenString string) (string, error) {
 	user, err := s.ValidateToken(tokenString)

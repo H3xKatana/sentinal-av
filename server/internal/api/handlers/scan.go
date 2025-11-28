@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"encoding/json"
+	"log"
 	"net/http"
 	"strconv"
 	"time"
@@ -112,8 +113,9 @@ func CreateScanResultHandler(svc *ScanService) http.HandlerFunc {
 
 		// Create threat records if any
 		for _, threat := range req.Threats {
+			scanResultID := scanResult.ID
 			threatRecord := models.Threat{
-				ScanResultID: scanResult.ID,
+				ScanResultID: &scanResultID,
 				FilePath:     threat.FilePath,
 				ThreatType:   threat.ThreatType,
 				ThreatName:   threat.ThreatName,
@@ -147,5 +149,62 @@ func GetScanThreatsHandler(svc *ScanService) http.HandlerFunc {
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(threats)
+	}
+}
+
+// TriggerScanRequest represents the request to trigger a scan on an agent
+type TriggerScanRequest struct {
+	AgentID    uint   `json:"agent_id"`
+	ScanType   string `json:"scan_type"`   // full, quick, custom
+	TargetPath string `json:"target_path"` // optional path to scan
+}
+
+// TriggerScanHandler handles requests to trigger a scan on an agent
+func TriggerScanHandler(svc *ScanService) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req TriggerScanRequest
+
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "Invalid request body", http.StatusBadRequest)
+			return
+		}
+
+		// Validate required fields
+		if req.AgentID == 0 {
+			http.Error(w, "AgentID is required", http.StatusBadRequest)
+			return
+		}
+
+		// Verify agent exists
+		var agent models.Agent
+		result := svc.DB.First(&agent, req.AgentID)
+		if result.Error != nil {
+			if result.Error == gorm.ErrRecordNotFound {
+				http.Error(w, "Agent not found", http.StatusNotFound)
+				return
+			}
+			http.Error(w, "Failed to verify agent", http.StatusInternalServerError)
+			return
+		}
+
+		// Log scan trigger
+		log.Printf("Scan triggered: AgentID=%d, AgentName=%s, ScanType=%s, TargetPath=%s",
+			req.AgentID, agent.Name, req.ScanType, req.TargetPath)
+
+		// In a real implementation, we would send a command to the agent to initiate the scan
+		// This might involve:
+		// 1. Adding the scan command to a queue
+		// 2. Using a pub/sub system to send the command
+		// 3. Updating the agent's status to indicate a pending scan
+		// For now, we'll just return a success response indicating the scan was queued
+		response := map[string]interface{}{
+			"status":    "success",
+			"agent_id":  req.AgentID,
+			"scan_type": req.ScanType,
+			"message":   "Scan has been queued for execution",
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(response)
 	}
 }

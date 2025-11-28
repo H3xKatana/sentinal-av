@@ -1,149 +1,80 @@
 package utils
 
 import (
-	"context"
-	"fmt"
-	"log"
 	"os"
-	"time"
 
-	"github.com/0xA1M/sentinel-server/internal/models"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"gorm.io/gorm/logger"
 )
 
-// GetZapLogger returns a configured zap logger
-func GetZapLogger() (*zap.Logger, error) {
-	config := zap.NewProductionConfig()
-
-	// Override the level based on environment variable
-	switch os.Getenv("LOG_LEVEL") {
-	case "debug":
-		config.Level = zap.NewAtomicLevelAt(zapcore.DebugLevel)
-	case "info":
-		config.Level = zap.NewAtomicLevelAt(zapcore.InfoLevel)
-	case "warn":
-		config.Level = zap.NewAtomicLevelAt(zapcore.WarnLevel)
-	case "error":
-		config.Level = zap.NewAtomicLevelAt(zapcore.ErrorLevel)
-	default:
-		config.Level = zap.NewAtomicLevelAt(zapcore.InfoLevel)
+// GetLogger returns a configured zap logger
+func GetLogger() *zap.Logger {
+	// Configure the logger based on environment
+	logLevel := zapcore.InfoLevel
+	if os.Getenv("LOG_LEVEL") == "debug" {
+		logLevel = zapcore.DebugLevel
 	}
 
-	return config.Build()
+	// Create encoder config
+	encoderConfig := zapcore.EncoderConfig{
+		TimeKey:        "time",
+		LevelKey:       "level",
+		NameKey:        "logger",
+		CallerKey:      "caller",
+		MessageKey:     "msg",
+		StacktraceKey:  "stacktrace",
+		LineEnding:     zapcore.DefaultLineEnding,
+		EncodeLevel:    zapcore.LowercaseLevelEncoder,
+		EncodeTime:     zapcore.ISO8601TimeEncoder,
+		EncodeDuration: zapcore.SecondsDurationEncoder,
+		EncodeCaller:   zapcore.ShortCallerEncoder,
+	}
+
+	// Create console and file cores
+	consoleCore := zapcore.NewCore(
+		zapcore.NewJSONEncoder(encoderConfig),
+		zapcore.AddSync(os.Stdout),
+		logLevel,
+	)
+
+	// Create the logger
+	log := zap.New(
+		zapcore.NewTee(consoleCore), // Add file core if needed: zapcore.NewTee(consoleCore, fileCore)
+		zap.AddCaller(),
+		zap.AddStacktrace(zapcore.ErrorLevel),
+	)
+
+	return log
 }
 
-// GetGormLogger returns a logger that implements GORM's logger interface with Zap
+// GetGormLogger returns a configured GORM logger
 func GetGormLogger() logger.Interface {
-	return CustomGormLogger{}
-}
-
-// CustomGormLogger implements GORM's logger interface using Zap
-type CustomGormLogger struct{}
-
-func (l CustomGormLogger) LogMode(level logger.LogLevel) logger.Interface {
-	return l
-}
-
-func (l CustomGormLogger) Info(ctx context.Context, msg string, data ...any) {
-	logger, _ := GetZapLogger()
-	if logger != nil {
-		logger.Info(fmt.Sprintf(msg, data...))
-		logger.Sync()
+	logLevel := logger.Info
+	if os.Getenv("LOG_LEVEL") == "debug" {
+		logLevel = logger.Info
+	} else if os.Getenv("LOG_LEVEL") == "silent" {
+		logLevel = logger.Silent
 	}
-}
 
-func (l CustomGormLogger) Warn(ctx context.Context, msg string, data ...any) {
-	logger, _ := GetZapLogger()
-	if logger != nil {
-		logger.Warn(fmt.Sprintf(msg, data...))
-		logger.Sync()
-	}
-}
-
-func (l CustomGormLogger) Error(ctx context.Context, msg string, data ...any) {
-	logger, _ := GetZapLogger()
-	if logger != nil {
-		logger.Error(fmt.Sprintf(msg, data...))
-		logger.Sync()
-	}
-}
-
-func (l CustomGormLogger) Trace(ctx context.Context, begin time.Time, fc func() (string, int64), err error) {
-	logger, _ := GetZapLogger()
-	if logger != nil {
-		elapsed := time.Since(begin)
-		sql, rows := fc()
-		if err != nil {
-			logger.Error("Database query failed",
-				zap.String("sql", sql),
-				zap.Int64("rows", rows),
-				zap.Duration("elapsed", elapsed),
-				zap.Error(err))
-		} else {
-			logger.Info("Database query executed",
-				zap.String("sql", sql),
-				zap.Int64("rows", rows),
-				zap.Duration("elapsed", elapsed))
-		}
-		logger.Sync()
-	}
-}
-
-// LogRequest logs incoming HTTP requests
-func LogRequest(method, url, remoteAddr string, userAgent string) {
-	logger, err := GetZapLogger()
-	if err != nil {
-		log.Printf("Failed to get logger: %v", err)
-		return
-	}
-	defer logger.Sync()
-
-	logger.Info("HTTP Request",
-		zap.String("method", method),
-		zap.String("url", url),
-		zap.String("remote_addr", remoteAddr),
-		zap.String("user_agent", userAgent),
-		zap.Time("timestamp", time.Now()),
+	return logger.New(
+		zapWriter{logger: GetLogger().Sugar()}, // Custom writer implementation
+		logger.Config{
+			SlowThreshold:             0, // Slow SQL threshold
+			LogLevel:                  logLevel, // Log level
+			IgnoreRecordNotFoundError: false, // Ignore ErrRecordNotFound error for logger
+			ParameterizedQueries:      false, // Don't include params in the SQL log
+			Colorful:                  false, // Disable color
+		},
 	)
 }
 
-// LogEvent logs security events
-func LogEvent(eventType, source, description, severity string, agentID uint) {
-	logger, err := GetZapLogger()
-	if err != nil {
-		log.Printf("Failed to get logger: %v", err)
-		return
-	}
-	defer logger.Sync()
-
-	logger.Info("Security Event",
-		zap.String("event_type", eventType),
-		zap.String("source", source),
-		zap.String("description", description),
-		zap.String("severity", severity),
-		zap.Uint("agent_id", agentID),
-		zap.Time("timestamp", time.Now()),
-	)
+// zapWriter implements the logger.Writer interface using Zap logger
+type zapWriter struct {
+	logger *zap.SugaredLogger
 }
 
-// LogThreat detected by the system
-func LogThreat(threat *models.Threat, agentID string) {
-	logger, err := GetZapLogger()
-	if err != nil {
-		log.Printf("Failed to get logger: %v", err)
-		return
-	}
-	defer logger.Sync()
-
-	logger.Info("Threat Detected",
-		zap.String("file_path", threat.FilePath),
-		zap.String("threat_type", threat.ThreatType),
-		zap.String("threat_name", threat.ThreatName),
-		zap.String("severity", threat.Severity),
-		zap.String("action_taken", threat.ActionTaken),
-		zap.String("agent_id", agentID),
-		zap.Time("timestamp", time.Now()),
-	)
+// Printf implements the logger.Writer interface
+func (w zapWriter) Printf(message string, data ...interface{}) {
+	w.logger.Debugf(message, data...)
 }

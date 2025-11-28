@@ -1,10 +1,13 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
@@ -18,6 +21,9 @@ import (
 	"github.com/0xA1M/sentinel-agent/scheduler"
 )
 
+// Global variable to track the agent's numeric ID after registration and lookup
+var agentNumericID uint = 1 // Default to 1 if we can't determine it properly
+
 func main() {
 	// Load environment variables from .env file
 	err := godotenv.Load()
@@ -28,7 +34,12 @@ func main() {
 	var path string
 	var runOnce bool
 	var enableMonitoring bool
-	flag.StringVar(&path, "path", ".", "File or directory to scan")
+	// Check environment variable for default scan path
+	defaultPath := os.Getenv("AGENT_SCAN_PATH")
+	if defaultPath == "" {
+		defaultPath = "." // Default to current directory if not set
+	}
+	flag.StringVar(&path, "path", defaultPath, "File or directory to scan")
 	flag.BoolVar(&runOnce, "once", false, "Run scan once and exit (don't start scheduler)")
 	flag.BoolVar(&enableMonitoring, "monitor", false, "Enable real-time system monitoring")
 	flag.Parse()
@@ -43,7 +54,7 @@ func main() {
 
 	// Create exporter
 	exporterConfig := exporter.Config{
-		ServerURL:  serverURL + "/data", // Use the /data endpoint for other data types
+		ServerURL:  serverURL + "/api/data", // Use the /api/data endpoint for other data types
 		AgentID:    agentName,
 		Timeout:    30 * time.Second,
 		RetryCount: 3,
@@ -55,8 +66,22 @@ func main() {
 	}
 	defer dataExporter.Stop()
 
-	// Create alert client for the new /alert endpoint
-	alertClient := common.NewAlertClient(serverURL)
+	// Create alert client for the new /api/alert endpoint
+	alertClient := common.NewAlertClient(serverURL + "/api")
+
+	// Create command client for polling commands from the server
+	commandClient := common.NewCommandClient(serverURL+"/api/commands", agentName)
+
+	// Register the agent with the server
+	err = registerAgent(serverURL, agentName)
+	if err != nil {
+		log.Printf("Warning: Failed to register agent: %v", err)
+	} else {
+		log.Printf("Agent registered successfully: %s", agentName)
+		// For a simple local setup, we'll assume the first registered agent gets ID 1
+		// In a production implementation, we'd retrieve the actual numeric ID
+		agentNumericID = 1 // Set the global agent ID variable for command polling
+	}
 
 	// Get VirusTotal API key from environment variable
 	vtAPIKey := os.Getenv("VT_KEY")
@@ -92,8 +117,14 @@ func main() {
 
 	// Schedule regular scan job
 	scanJob := func() error {
+		log.Printf("Starting scheduled scan job...")
 		_, err := runScan(scanner, path, dataExporter, agentName)
-		return err
+		if err != nil {
+			log.Printf("Scheduled scan job failed: %v", err)
+			return err
+		}
+		log.Printf("Scheduled scan job completed")
+		return nil
 	}
 
 	if err := jobScheduler.ScheduleFunc("regular-scan", "@every 1h", scanJob); err != nil {
@@ -102,7 +133,14 @@ func main() {
 
 	// Schedule system status report
 	statusJob := func() error {
-		return reportSystemStatus(dataExporter, agentName)
+		log.Printf("Starting system status report job...")
+		err := reportSystemStatus(dataExporter, agentName)
+		if err != nil {
+			log.Printf("System status report job failed: %v", err)
+			return err
+		}
+		log.Printf("System status report job completed")
+		return nil
 	}
 
 	if err := jobScheduler.ScheduleFunc("system-status", "@every 10m", statusJob); err != nil {
@@ -186,12 +224,65 @@ func main() {
 		log.Fatalf("Failed to start scheduler: %v", err)
 	}
 
+	// Create signal channel for graceful shutdown
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+
+	// Start command polling in a separate goroutine
+	go func() {
+		ticker := time.NewTicker(30 * time.Second) // Poll every 30 seconds
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ticker.C:
+				// Poll for pending commands using the agent's numeric ID
+				commands, err := commandClient.GetPendingCommandsByAgentID(agentNumericID)
+				if err != nil {
+					log.Printf("Failed to fetch commands: %v", err)
+					continue
+				}
+
+				for _, cmd := range commands {
+					log.Printf("Processing command: %s (ID: %d)", cmd.Command, cmd.ID)
+
+					// Execute the command based on its type
+					switch cmd.Command {
+					case "scan":
+						err := executeScanCommand(cmd, scanner, dataExporter, agentName)
+						if err != nil {
+							log.Printf("Error executing scan command: %v", err)
+							// Update command status to failed
+							commandErr := commandClient.UpdateCommandStatus(cmd.ID, "failed", err.Error())
+							if commandErr != nil {
+								log.Printf("Failed to update command status: %v", commandErr)
+							}
+						} else {
+							// Update command status to completed
+							commandErr := commandClient.UpdateCommandStatus(cmd.ID, "completed", "")
+							if commandErr != nil {
+								log.Printf("Failed to update command status: %v", commandErr)
+							}
+						}
+					default:
+						log.Printf("Unknown command: %s", cmd.Command)
+						// Update command status to failed for unknown commands
+						commandErr := commandClient.UpdateCommandStatus(cmd.ID, "failed", "Unknown command")
+						if commandErr != nil {
+							log.Printf("Failed to update command status: %v", commandErr)
+						}
+					}
+				}
+			case <-sigChan: // Stop polling when the agent is shutting down
+				return
+			}
+		}
+	}()
+
 	fmt.Println("Sentinel-AV Agent started with scheduler and exporter...")
 	fmt.Printf("Scheduler running with %d jobs\n", len(jobScheduler.Jobs()))
 
 	// Wait for interrupt signal to stop the agent
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
 	<-sigChan
 
 	fmt.Println("\nShutting down agent...")
@@ -212,6 +303,9 @@ type FileScanner interface {
 func runScan(scanner interface{}, path string, dataExporter *exporter.HTTPExporter, agentID string) ([]string, error) {
 	startTime := time.Now()
 
+	// Log scan start
+	log.Printf("Starting scan: Path=%s, AgentID=%s", path, agentID)
+
 	// Type assert to get the scanner interface
 	var fileScanner FileScanner
 
@@ -225,8 +319,13 @@ func runScan(scanner interface{}, path string, dataExporter *exporter.HTTPExport
 	// Scan the specified path
 	infectedFiles, err := fileScanner.ScanPath(path)
 	if err != nil {
+		log.Printf("Scan failed: Path=%s, Error=%v", path, err)
 		return nil, fmt.Errorf("scan failed: %v", err)
 	}
+
+	// Log scan completion
+	log.Printf("Scan completed: Path=%s, InfectedFiles=%d, Duration=%s",
+		path, len(infectedFiles), time.Since(startTime))
 
 	// Create scan result
 	scanResult := common.ScanResult{
@@ -261,8 +360,103 @@ func runScan(scanner interface{}, path string, dataExporter *exporter.HTTPExport
 	return infectedFiles, nil
 }
 
+// executeScanCommand executes a scan command received from the server
+func executeScanCommand(cmd common.Command, scanner interface{}, dataExporter *exporter.HTTPExporter, agentID string) error {
+	var targetPath string
+
+	// If the command has parameters, try to parse the target path
+	if cmd.Params != "" {
+		var params map[string]interface{}
+		if err := json.Unmarshal([]byte(cmd.Params), &params); err != nil {
+			// If JSON parsing fails, use the params as the path directly
+			targetPath = cmd.Params
+		} else {
+			// Otherwise, look for a "target_path" field in the parameters
+			if path, ok := params["target_path"].(string); ok {
+				targetPath = path
+			} else {
+				// Default to scanning the current directory if no path specified
+				targetPath = "."
+			}
+		}
+	} else {
+		// Default to scanning the current directory if no parameters
+		targetPath = "."
+	}
+
+	log.Printf("Executing scan command: ID=%d, Type=%s, Path=%s, AgentID=%s",
+		cmd.ID, cmd.Command, targetPath, agentID)
+
+	// Run the scan
+	_, err := runScan(scanner, targetPath, dataExporter, agentID)
+	if err != nil {
+		log.Printf("Scan command execution failed: ID=%d, Error=%v", cmd.ID, err)
+		return fmt.Errorf("scan command execution failed: %v", err)
+	}
+
+	log.Printf("Scan command completed: ID=%d, Path=%s", cmd.ID, targetPath)
+	return nil
+}
+
+// registerAgent registers the agent with the server
+func registerAgent(serverURL, agentName string) error {
+	// Get system information for registration
+	hostname, err := os.Hostname()
+	if err != nil {
+		hostname = "unknown"
+	}
+
+	// Create registration payload
+	registrationData := map[string]interface{}{
+		"agent_id": agentName,
+		"name":     agentName,
+		"hostname": hostname,
+		"platform": getPlatform(),
+		"version":  "1.0.0",
+	}
+
+	jsonData, err := json.Marshal(registrationData)
+	if err != nil {
+		return fmt.Errorf("failed to marshal registration data: %v", err)
+	}
+
+	resp, err := http.Post(
+		serverURL+"/api/register",
+		"application/json",
+		bytes.NewBuffer(jsonData),
+	)
+	if err != nil {
+		return fmt.Errorf("failed to send registration request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+		return fmt.Errorf("registration failed with status: %d", resp.StatusCode)
+	}
+
+	return nil
+}
+
+// getPlatform returns the current platform
+func getPlatform() string {
+	platform := "unknown"
+
+	// This could be more sophisticated, but for now we'll keep it simple
+	goos := os.Getenv("GOOS")
+	if goos != "" {
+		platform = goos
+	} else {
+		// Try to determine the platform in a different way
+		// This is a simplified approach - in production you might want to use runtime.GOOS
+		platform = "linux" // default for the current focus
+	}
+	return platform
+}
+
 // reportSystemStatus reports the current system status
 func reportSystemStatus(dataExporter *exporter.HTTPExporter, agentID string) error {
+	log.Printf("Generating system status report for agent: %s", agentID)
+
 	// Create system status report
 	status := common.SystemStatus{
 		ID:        fmt.Sprintf("status_%d", time.Now().UnixNano()),
@@ -294,8 +488,10 @@ func reportSystemStatus(dataExporter *exporter.HTTPExporter, agentID string) err
 	}
 
 	if err := dataExporter.Export(ctx, exportData); err != nil {
+		log.Printf("Failed to export system status: %v", err)
 		return fmt.Errorf("failed to export system status: %v", err)
 	}
 
+	log.Printf("System status report exported successfully for agent: %s", agentID)
 	return nil
 }

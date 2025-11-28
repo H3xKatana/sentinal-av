@@ -133,3 +133,60 @@ func DeleteQuarantinedFileHandler(svc *QuarantineService) http.HandlerFunc {
 		json.NewEncoder(w).Encode(map[string]string{"status": "success"})
 	}
 }
+
+// CreateQuarantinedFileHandler creates a new quarantined file entry
+func CreateQuarantinedFileHandler(svc *QuarantineService) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			AgentID       uint   `json:"agent_id"`
+			OriginalPath  string `json:"original_path"`
+			QuarantinePath string `json:"quarantine_path"`
+			ThreatName    string `json:"threat_name"`
+			FileHash      string `json:"file_hash"`
+			FileName      string `json:"file_name"`
+			FileSize      int64  `json:"file_size"`
+			ActionBy      string `json:"action_by"`
+			ActionReason  string `json:"action_reason"`
+		}
+
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "Invalid request body", http.StatusBadRequest)
+			return
+		}
+
+		// Verify agent exists
+		var agent models.Agent
+		result := svc.DB.First(&agent, req.AgentID)
+		if result.Error != nil {
+			if result.Error == gorm.ErrRecordNotFound {
+				http.Error(w, "Agent not found", http.StatusNotFound)
+				return
+			}
+			http.Error(w, "Failed to verify agent", http.StatusInternalServerError)
+			return
+		}
+
+		// Create quarantined file entry
+		quarantine := models.Quarantine{
+			AgentID:        req.AgentID,
+			OriginalPath:   req.OriginalPath,
+			QuarantinePath: req.QuarantinePath,
+			ThreatName:     req.ThreatName,
+			FileHash:       req.FileHash,
+			FileName:       req.FileName,
+			FileSize:       req.FileSize,
+			Status:         "quarantined", // Set initial status as quarantined
+			ActionBy:       req.ActionBy,
+			ActionReason:   req.ActionReason,
+		}
+
+		result = svc.DB.Create(&quarantine)
+		if result.Error != nil {
+			http.Error(w, "Failed to create quarantined file entry", http.StatusInternalServerError)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(quarantine)
+	}
+}

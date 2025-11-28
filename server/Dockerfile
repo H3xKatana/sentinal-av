@@ -1,8 +1,8 @@
 # Use multi-stage build to keep final image small
 FROM golang:1.25.4-alpine AS builder
 
-# Install git and other build dependencies
-RUN apk add --no-cache git ca-certificates gcc musl-dev
+# Install git, build dependencies, and SQLite development libraries for CGO
+RUN apk add --no-cache git ca-certificates gcc musl-dev sqlite-dev
 
 # Set working directory
 WORKDIR /app
@@ -16,14 +16,14 @@ RUN go mod download
 # Copy source code
 COPY . .
 
-# Build the application
+# Build the application with CGO enabled for SQLite support
 RUN CGO_ENABLED=1 GOOS=linux go build -a -installsuffix cgo -o sentinel-server ./cmd/server/main.go
 
 # Final stage
 FROM alpine:latest
 
-# Install ca-certificates for TLS connections
-RUN apk --no-cache add ca-certificates
+# Install ca-certificates and SQLite for TLS connections and database support
+RUN apk --no-cache add ca-certificates sqlite
 
 # Create a non-root user
 RUN adduser -D -s /bin/sh sentinel

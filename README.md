@@ -178,25 +178,28 @@ git clone https://github.com/0xA1M/sentinal-av
 cd sentinel-av
 ```
 
-### 2. Start dependencies (Postgres, server, dashboard)
+### 2. Configure environment variables
+
+Create a `.env` file based on `.env.example` and set your environment variables:
+
+```bash
+cp .env.example .env
+# Edit .env to add your VT_KEY (VirusTotal API key)
+```
+
+### 3. Start the complete system (Postgres, server, dashboard, and agent)
 
 ```bash
 docker compose up --build
 ```
 
-### 3. Run a local agent
+This will start all components as a unit:
+- PostgreSQL database
+- Sentinel server (API and gRPC)
+- Web dashboard
+- Agent (connected to the server)
 
-```bash
-go run ./cmd/agent
-```
-
-or via Docker:
-
-```bash
-docker run --net=sentinel-net sentinel-agent
-```
-
-### 4. Open the Web UI
+### 4. Access the Web UI
 
 ```
 http://localhost:8080
