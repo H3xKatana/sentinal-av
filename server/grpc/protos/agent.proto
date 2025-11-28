@@ -1,0 +1,137 @@
+syntax = "proto3";
+
+package sentinel;
+
+option go_package = "github.com/0xA1M/sentinel-server/grpc/pb";
+
+// Agent service for communication between server and agents
+service AgentService {
+  // Agent registration
+  rpc RegisterAgent(RegisterAgentRequest) returns (RegisterAgentResponse);
+
+  // Send scan results from agent to server
+  rpc SendScanResults(ScanResultsRequest) returns (ScanResultsResponse);
+
+  // Get latest signatures for agent sync
+  rpc GetSignatures(GetSignaturesRequest) returns (GetSignaturesResponse);
+
+  // Send security events from agent to server
+  rpc SendEvent(EventRequest) returns (EventResponse);
+
+  // Agent heartbeat to maintain connection
+  rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
+}
+
+// Agent registration request
+message RegisterAgentRequest {
+  string agent_name = 1;
+  string hostname = 2;
+  string platform = 3; // linux, windows, darwin
+  string version = 4;
+  string ip_address = 5;
+  string public_key = 6;
+}
+
+// Agent registration response
+message RegisterAgentResponse {
+  string agent_id = 1;
+  string token = 2;
+  string status = 3;
+  string message = 4;
+}
+
+// Scan results request
+message ScanResultsRequest {
+  string agent_id = 1;
+  string scan_type = 2; // full, quick, custom, real-time
+  repeated string file_paths = 3;
+  repeated Threat threats = 4;
+  int64 scan_time = 5; // Unix timestamp
+  int64 duration = 6; // in milliseconds
+  string status = 7; // completed, failed, in-progress
+}
+
+// Scan results response
+message ScanResultsResponse {
+  string status = 1;
+  string message = 2;
+}
+
+// Threat detected in scan
+message Threat {
+  string file_path = 1;
+  string threat_type = 2; // malware, heuristic, suspicious
+  string threat_name = 3; // YARA rule name, hash match, etc.
+  string severity = 4; // low, medium, high, critical
+  string action_taken = 5; // quarantined, blocked, reported
+}
+
+// Get signatures request
+message GetSignaturesRequest {
+  string agent_id = 1;
+  string last_sync_time = 2; // ISO 8601 timestamp
+}
+
+// Get signatures response
+message GetSignaturesResponse {
+  repeated Signature signatures = 1;
+  int32 signature_count = 2;
+  string sync_time = 3; // ISO 8601 timestamp
+  string status = 4;
+}
+
+// Signature definition
+message Signature {
+  uint32 id = 1;
+  string name = 2;
+  string type = 3; // yara, hash, heuristic
+  string content = 4; // YARA rule content or hash
+  string hash_type = 5; // md5, sha256 (for hash signatures)
+  string threat_type = 6; // malware family, trojan, etc.
+  string description = 7;
+  string version = 8;
+  string status = 9; // active, inactive, deprecated
+  string updated_at = 10; // ISO 8601 timestamp
+}
+
+// Event request
+message EventRequest {
+  string agent_id = 1;
+  string event_type = 2; // process_creation, network_connection, file_access, etc.
+  string event_source = 3; // agent, signature, heuristic
+  string description = 4;
+  string severity = 5; // info, warning, high, critical
+  string data = 6; // JSON string with event-specific details
+  int64 timestamp = 7; // Unix timestamp
+}
+
+// Event response
+message EventResponse {
+  string status = 1;
+  string message = 2;
+}
+
+// Heartbeat request
+message HeartbeatRequest {
+  string agent_id = 1;
+  string token = 2;
+  int64 timestamp = 3; // Unix timestamp
+}
+
+// Heartbeat response
+message HeartbeatResponse {
+  string status = 1;
+  string message = 2;
+  int64 server_time = 3; // Unix timestamp
+  bool quarantine_mode = 4; // If the agent should go into quarantine mode
+  repeated Command commands = 5; // Pending commands for the agent
+}
+
+// Command to be executed by the agent
+message Command {
+  string id = 1;
+  string type = 2; // scan, quarantine, update_policy, etc.
+  string target = 3; // target of the command
+  string params = 4; // JSON string with command parameters
+  int64 created_at = 5; // Unix timestamp
+}

@@ -1,6 +1,18 @@
-.PHONY: all server agent web clean
+.PHONY: all server agent web clean gen-grpc install-proto-deps
 
 all: server agent web
+
+# Install gRPC dependencies
+install-proto-deps:
+	go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
+	go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest
+
+# Generate gRPC code from proto files
+gen-grpc: install-proto-deps
+	protoc --go_out=./server/grpc/pb --go_opt=paths=source_relative \
+		--go-grpc_out=./server/grpc/pb --go-grpc_opt=paths=source_relative \
+		-I./server/grpc/protos \
+		./server/grpc/protos/*.proto
 
 # Server
 server:
@@ -35,3 +47,7 @@ clean:
 	@echo "Cleaning binaries..."
 	rm -rf server/bin/*
 	rm -rf agent/bin/*
+
+# Clean generated gRPC code
+clean-grpc:
+	rm -f server/grpc/pb/*.go

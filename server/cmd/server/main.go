@@ -1,145 +1,125 @@
 package main
 
 import (
-	"encoding/json"
+	"context"
+	"fmt"
 	"log"
 	"net/http"
+	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
-	"github.com/0xA1M/sentinel-server/db"
+	"github.com/0xA1M/sentinel-server/grpc"
+	"github.com/0xA1M/sentinel-server/internal/api"
+	"github.com/0xA1M/sentinel-server/internal/auth"
+	"github.com/0xA1M/sentinel-server/internal/db"
+	"github.com/0xA1M/sentinel-server/internal/scheduler"
+	"github.com/0xA1M/sentinel-server/internal/signatures"
+	syncsvc "github.com/0xA1M/sentinel-server/internal/sync"
 )
 
-type HealthResponse struct {
-	Status string `json:"status"`
-	Time   string `json:"time"`
-}
-
-type RegisterRequest struct {
-	AgentName string `json:"agent_name"`
-}
-
-type RegisterResponse struct {
-	AgentID string `json:"agent_id"`
-	Token   string `json:"token"`
-}
-
-type ScanResultRequest struct {
-	AgentName string   `json:"agent_name"`
-	Infected  []string `json:"infected"`
-}
-
-type AlertRequest struct {
-	Source      string `json:"source"`
-	AlertType   string `json:"alert_type"`
-	Description string `json:"description"`
-	Data        string `json:"data"`
-}
-
-var scanResults = make([]ScanResultRequest, 0)
-
-func healthHandler(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	resp := HealthResponse{
-		Status: "ok",
-		Time:   time.Now().Format(time.RFC3339),
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(resp)
-}
-
-func registerHandler(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	var req RegisterRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Bad requests", http.StatusBadRequest)
-		return
-	}
-
-	resp := RegisterResponse{
-		AgentID: "dummy-agent-id",
-		Token:   "dummy-token",
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(resp)
-	log.Printf("Agent registered: %s\n", req.AgentName)
-}
-
-func scanResultHandler(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	var req ScanResultRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Bad request", http.StatusBadRequest)
-		return
-	}
-
-	scanResults = append(scanResults, req)
-	log.Printf("Received scan result from %s: %v\n", req.AgentName, req.Infected)
-
-	w.WriteHeader(http.StatusOK)
-	w.Write([]byte(`{"status":"ok"}`))
-}
-
-func alertHandler(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	var req AlertRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Bad request", http.StatusBadRequest)
-		return
-	}
-
-	// Insert the alert into the database
-	statement, err := db.DB.Prepare("INSERT INTO alerts (source, alert_type, description, data) VALUES (?, ?, ?, ?)")
-	if err != nil {
-		log.Printf("Failed to prepare statement: %v", err)
-		http.Error(w, "Internal server error", http.StatusInternalServerError)
-		return
-	}
-	defer statement.Close()
-
-	_, err = statement.Exec(req.Source, req.AlertType, req.Description, req.Data)
-	if err != nil {
-		log.Printf("Failed to insert alert: %v", err)
-		http.Error(w, "Internal server error", http.StatusInternalServerError)
-		return
-	}
-
-	log.Printf("Alert received: %s - %s\n", req.AlertType, req.Description)
-
-	w.WriteHeader(http.StatusOK)
-	w.Write([]byte(`{"status":"ok"}`))
-}
-
 func main() {
-	// Initialize database
-	db.InitDB()
-	defer db.CloseDB()
-
-	mux := http.NewServeMux()
-	mux.HandleFunc("/health", healthHandler)
-	mux.HandleFunc("/register", registerHandler)
-	mux.HandleFunc("/scan-result", scanResultHandler)
-	mux.HandleFunc("/alert", alertHandler)
-
-	log.Println("Sentinel-server started on port :3000")
-	if err := http.ListenAndServe(":3000", mux); err != nil {
-		log.Fatal(err)
+	// Initialize database connection
+	database, err := db.Connect()
+	if err != nil {
+		log.Fatalf("Failed to connect to database: %v", err)
 	}
+
+	// Run database migrations
+	if err := db.Migrate(); err != nil {
+		log.Fatalf("Failed to migrate database: %v", err)
+	}
+
+	// Initialize services
+	authSvc := auth.NewService(database)
+	signatureSvc := signatures.NewService(database)
+	syncSvc := syncsvc.NewService(database, signatureSvc)
+	schedulerSvc := scheduler.NewService(database, syncSvc)
+
+	// Start the scheduler
+	schedulerSvc.Start()
+
+	// Start gRPC server
+	grpcServer := grpc.NewServer(database, authSvc)
+	grpcPort := getEnv("GRPC_PORT", "50051")
+	go func() {
+		if err := grpcServer.Start(grpcPort); err != nil {
+			log.Fatalf("Failed to start gRPC server: %v", err)
+		}
+	}()
+
+	// Set up HTTP API server
+	router := api.Router(database, authSvc)
+
+	// Add health check endpoints for container orchestration
+	router.PathPrefix("/health").HandlerFunc(healthHandler).Methods("GET")
+	router.PathPrefix("/live").HandlerFunc(livenessHandler).Methods("GET")
+
+	httpPort := getEnv("HTTP_PORT", "3000")
+	addr := fmt.Sprintf(":%s", httpPort)
+
+	// Create HTTP server with timeouts for production
+	httpServer := &http.Server{
+		Addr:         addr,
+		Handler:      router,
+		ReadTimeout:  15 * time.Second,
+		WriteTimeout: 15 * time.Second,
+		IdleTimeout:  60 * time.Second,
+	}
+
+	log.Printf("Starting Sentinel server on HTTP port %s", httpPort)
+	log.Printf("gRPC server starting on port %s", grpcPort)
+
+	// Start HTTP server in a goroutine
+	go func() {
+		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("Failed to start HTTP server: %v", err)
+		}
+	}()
+
+	// Wait for interrupt signal to gracefully shutdown the server
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	<-quit
+	log.Println("Shutting down servers...")
+
+	// Give outstanding requests a deadline for completion
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	// Shutdown HTTP server
+	if err := httpServer.Shutdown(ctx); err != nil {
+		log.Printf("HTTP server shutdown error: %v", err)
+	}
+
+	// Stop gRPC server
+	grpcServer.Stop()
+
+	// Stop scheduler
+	schedulerSvc.Stop()
+
+	log.Println("Servers shut down successfully")
+}
+
+// getEnv retrieves an environment variable or returns a default value
+func getEnv(key, defaultValue string) string {
+	if value := os.Getenv(key); value != "" {
+		return value
+	}
+	return defaultValue
+}
+
+// healthHandler provides a readiness health check
+func healthHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	fmt.Fprint(w, `{"status": "healthy", "service": "sentinel-server", "timestamp": "`+time.Now().Format(time.RFC3339)+`"}`)
+}
+
+// livenessHandler provides a liveness health check
+func livenessHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	fmt.Fprint(w, `{"status": "alive", "service": "sentinel-server", "timestamp": "`+time.Now().Format(time.RFC3339)+`"}`)
 }
