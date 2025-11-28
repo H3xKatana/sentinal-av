@@ -20,16 +20,22 @@ import (
 )
 
 func main() {
+	log.Println("Starting Sentinel server initialization...")
+
 	// Initialize database connection
 	database, err := db.Connect()
 	if err != nil {
 		log.Fatalf("Failed to connect to database: %v", err)
 	}
 
+	log.Println("Database connection established successfully")
+
 	// Run database migrations
 	if err := db.Migrate(); err != nil {
 		log.Fatalf("Failed to migrate database: %v", err)
 	}
+
+	log.Println("Database migrations completed successfully")
 
 	// Initialize services
 	authSvc := auth.NewService(database)
@@ -37,19 +43,24 @@ func main() {
 	syncSvc := syncsvc.NewService(database, signatureSvc)
 	schedulerSvc := scheduler.NewService(database, syncSvc)
 
+	log.Println("Services initialized successfully")
+
 	// Start the scheduler
 	schedulerSvc.Start()
+	log.Println("Scheduler started successfully")
 
-	// Start gRPC server
+	// Start gRPC server for agent communication
 	grpcServer := grpc.NewServer(database, authSvc)
 	grpcPort := getEnv("GRPC_PORT", "50051")
+
 	go func() {
+		log.Printf("Starting gRPC server on port %s", grpcPort)
 		if err := grpcServer.Start(grpcPort); err != nil {
 			log.Fatalf("Failed to start gRPC server: %v", err)
 		}
 	}()
 
-	// Set up HTTP API server
+	// Set up HTTP API server for web UI
 	router := api.Router(database, authSvc)
 
 	// Add health check endpoints for container orchestration
@@ -63,13 +74,12 @@ func main() {
 	httpServer := &http.Server{
 		Addr:         addr,
 		Handler:      router,
-		ReadTimeout:  15 * time.Second,
-		WriteTimeout: 15 * time.Second,
-		IdleTimeout:  60 * time.Second,
+		ReadTimeout:  30 * time.Second,
+		WriteTimeout: 30 * time.Second,
+		IdleTimeout:  120 * time.Second,
 	}
 
-	log.Printf("Starting Sentinel server on HTTP port %s", httpPort)
-	log.Printf("gRPC server starting on port %s", grpcPort)
+	log.Printf("Starting HTTP API server on port %s", httpPort)
 
 	// Start HTTP server in a goroutine
 	go func() {
@@ -78,11 +88,13 @@ func main() {
 		}
 	}()
 
+	log.Printf("Sentinel server started successfully - HTTP: %s, gRPC: %s", httpPort, grpcPort)
+
 	// Wait for interrupt signal to gracefully shutdown the server
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
-	log.Println("Shutting down servers...")
+	log.Println("Shutting down servers gracefully...")
 
 	// Give outstanding requests a deadline for completion
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)

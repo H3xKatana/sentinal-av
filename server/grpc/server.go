@@ -42,16 +42,35 @@ func (s *Server) RegisterAgent(ctx context.Context, req *pb.RegisterAgentRequest
 	result := s.DB.Where("name = ? OR public_key = ?", req.AgentName, req.PublicKey).First(&existingAgent)
 
 	if result.Error == nil {
-		// Agent already exists
+		// Agent already exists, update information and return
+		existingAgent.Hostname = req.Hostname
+		existingAgent.Platform = req.Platform
+		existingAgent.Version = req.Version
+		existingAgent.IPAddress = req.IpAddress
+		now := time.Now()
+		existingAgent.LastSeen = &now
+		existingAgent.IsActive = true
+
+		result = s.DB.Save(&existingAgent)
+		if result.Error != nil {
+			return nil, status.Error(codes.Internal, "Failed to update existing agent")
+		}
+
+		// Generate a new token for the existing agent
+		token, err := s.AuthSvc.GenerateAgentToken(existingAgent.AgentID)
+		if err != nil {
+			return nil, status.Error(codes.Internal, "Failed to generate token")
+		}
+
 		return &pb.RegisterAgentResponse{
 			AgentId: existingAgent.AgentID,
-			Token:   "dummy-token", // In a real implementation, generate a proper token
+			Token:   token,
 			Status:  "success",
-			Message: "Agent already registered",
+			Message: "Agent already registered, updated info",
 		}, nil
 	} else if result.Error != gorm.ErrRecordNotFound {
 		// Database error
-		return nil, status.Error(codes.Internal, "Database error")
+		return nil, status.Error(codes.Internal, fmt.Sprintf("Database error: %v", result.Error))
 	}
 
 	// Create new agent
@@ -70,19 +89,25 @@ func (s *Server) RegisterAgent(ctx context.Context, req *pb.RegisterAgentRequest
 
 	result = s.DB.Create(&agent)
 	if result.Error != nil {
-		return nil, status.Error(codes.Internal, "Failed to register agent")
+		return nil, status.Error(codes.Internal, fmt.Sprintf("Failed to register agent: %v", result.Error))
 	}
 
 	// Generate a proper agent ID
 	agent.AgentID = fmt.Sprintf("agent-%d-%d", time.Now().Unix(), agent.ID)
 	result = s.DB.Save(&agent)
 	if result.Error != nil {
-		return nil, status.Error(codes.Internal, "Failed to save agent ID")
+		return nil, status.Error(codes.Internal, fmt.Sprintf("Failed to save agent ID: %v", result.Error))
+	}
+
+	// Generate token for the new agent
+	token, err := s.AuthSvc.GenerateAgentToken(agent.AgentID)
+	if err != nil {
+		return nil, status.Error(codes.Internal, "Failed to generate token")
 	}
 
 	return &pb.RegisterAgentResponse{
 		AgentId: agent.AgentID,
-		Token:   "dummy-token", // In a real implementation, generate a proper token
+		Token:   token,
 		Status:  "success",
 		Message: "Agent registered successfully",
 	}, nil
@@ -97,7 +122,7 @@ func (s *Server) SendScanResults(ctx context.Context, req *pb.ScanResultsRequest
 		if result.Error == gorm.ErrRecordNotFound {
 			return nil, status.Error(codes.NotFound, "Agent not found")
 		}
-		return nil, status.Error(codes.Internal, "Database error")
+		return nil, status.Error(codes.Internal, fmt.Sprintf("Database error: %v", result.Error))
 	}
 
 	// Convert protobuf scan results to model
@@ -114,13 +139,15 @@ func (s *Server) SendScanResults(ctx context.Context, req *pb.ScanResultsRequest
 
 	result = s.DB.Create(&scanResult)
 	if result.Error != nil {
-		return nil, status.Error(codes.Internal, "Failed to save scan result")
+		return nil, status.Error(codes.Internal, fmt.Sprintf("Failed to save scan result: %v", result.Error))
 	}
 
 	// Create threat records if any
 	for _, threat := range req.Threats {
+		scanResultID := scanResult.ID
 		threatRecord := models.Threat{
-			ScanResultID: scanResult.ID,
+			ScanResultID: &scanResultID,
+			AgentID:      &agent.ID,
 			FilePath:     threat.FilePath,
 			ThreatType:   threat.ThreatType,
 			ThreatName:   threat.ThreatName,
@@ -131,6 +158,11 @@ func (s *Server) SendScanResults(ctx context.Context, req *pb.ScanResultsRequest
 		s.DB.Create(&threatRecord)
 	}
 
+	// Update agent's last seen time
+	now := time.Now()
+	agent.LastSeen = &now
+	s.DB.Save(&agent)
+
 	return &pb.ScanResultsResponse{
 		Status:  "success",
 		Message: "Scan results received",
@@ -139,10 +171,20 @@ func (s *Server) SendScanResults(ctx context.Context, req *pb.ScanResultsRequest
 
 // GetSignatures returns the latest signatures for agent sync
 func (s *Server) GetSignatures(ctx context.Context, req *pb.GetSignaturesRequest) (*pb.GetSignaturesResponse, error) {
-	var signatures []models.Signature
-	result := s.DB.Where("status = ?", "active").Find(&signatures)
+	// Find the agent by ID to verify it exists
+	var agent models.Agent
+	result := s.DB.Where("agent_id = ?", req.AgentId).First(&agent)
 	if result.Error != nil {
-		return nil, status.Error(codes.Internal, "Failed to retrieve signatures")
+		if result.Error == gorm.ErrRecordNotFound {
+			return nil, status.Error(codes.NotFound, "Agent not found")
+		}
+		return nil, status.Error(codes.Internal, fmt.Sprintf("Database error: %v", result.Error))
+	}
+
+	var signatures []models.Signature
+	result = s.DB.Where("status = ?", "active").Find(&signatures)
+	if result.Error != nil {
+		return nil, status.Error(codes.Internal, fmt.Sprintf("Failed to retrieve signatures: %v", result.Error))
 	}
 
 	pbSignatures := make([]*pb.Signature, len(signatures))
@@ -161,6 +203,11 @@ func (s *Server) GetSignatures(ctx context.Context, req *pb.GetSignaturesRequest
 		}
 	}
 
+	// Update agent's last seen time
+	now := time.Now()
+	agent.LastSeen = &now
+	s.DB.Save(&agent)
+
 	return &pb.GetSignaturesResponse{
 		Signatures:     pbSignatures,
 		SignatureCount: int32(len(signatures)),
@@ -178,7 +225,7 @@ func (s *Server) SendEvent(ctx context.Context, req *pb.EventRequest) (*pb.Event
 		if result.Error == gorm.ErrRecordNotFound {
 			return nil, status.Error(codes.NotFound, "Agent not found")
 		}
-		return nil, status.Error(codes.Internal, "Database error")
+		return nil, status.Error(codes.Internal, fmt.Sprintf("Database error: %v", result.Error))
 	}
 
 	// Create the event
@@ -194,8 +241,13 @@ func (s *Server) SendEvent(ctx context.Context, req *pb.EventRequest) (*pb.Event
 
 	result = s.DB.Create(&event)
 	if result.Error != nil {
-		return nil, status.Error(codes.Internal, "Failed to save event")
+		return nil, status.Error(codes.Internal, fmt.Sprintf("Failed to save event: %v", result.Error))
 	}
+
+	// Update agent's last seen time
+	now := time.Now()
+	agent.LastSeen = &now
+	s.DB.Save(&agent)
 
 	return &pb.EventResponse{
 		Status:  "success",
@@ -212,7 +264,15 @@ func (s *Server) Heartbeat(ctx context.Context, req *pb.HeartbeatRequest) (*pb.H
 		if result.Error == gorm.ErrRecordNotFound {
 			return nil, status.Error(codes.NotFound, "Agent not found")
 		}
-		return nil, status.Error(codes.Internal, "Database error")
+		return nil, status.Error(codes.Internal, fmt.Sprintf("Database error: %v", result.Error))
+	}
+
+	// Verify the token if provided
+	if req.Token != "" {
+		claims, err := s.AuthSvc.ParseAgentToken(req.Token)
+		if err != nil || claims["agent_id"] != req.AgentId {
+			return nil, status.Error(codes.Unauthenticated, "Invalid token")
+		}
 	}
 
 	// Update last seen time
@@ -222,14 +282,19 @@ func (s *Server) Heartbeat(ctx context.Context, req *pb.HeartbeatRequest) (*pb.H
 
 	result = s.DB.Save(&agent)
 	if result.Error != nil {
-		return nil, status.Error(codes.Internal, "Failed to update agent heartbeat")
+		return nil, status.Error(codes.Internal, fmt.Sprintf("Failed to update agent heartbeat: %v", result.Error))
 	}
 
 	// Check if agent is in quarantine mode
 	quarantineMode := agent.Quarantine
 
-	// For now, return an empty command list
-	commands := []*pb.Command{}
+	// Fetch pending commands for the agent from the database
+	var commands []*pb.Command
+	if !quarantineMode {
+		// In a complete implementation, you would query a Command model table
+		// For now, returning an empty list
+		commands = make([]*pb.Command, 0)
+	}
 
 	return &pb.HeartbeatResponse{
 		Status:         "success",
@@ -244,7 +309,9 @@ func (s *Server) Heartbeat(ctx context.Context, req *pb.HeartbeatRequest) (*pb.H
 func (s *Server) Start(port string) error {
 	var opts []grpc.ServerOption
 
-	// Add authentication interceptor
+	// Add authentication interceptor if needed
+	// Note: For agent registration, we may want to allow unauthenticated calls
+	// This is a simplified approach - a full implementation would have more nuanced auth
 	opts = append(opts, grpc.UnaryInterceptor(s.AuthSvc.GRPCAuthInterceptor))
 
 	// Add TLS if enabled
@@ -290,11 +357,6 @@ func (s *Server) Stop() {
 		// Close listener if not already closed by GracefulStop
 		s.lis.Close()
 	}
-}
-
-// RegisterAgentServiceServer registers the agent service with the gRPC server
-func RegisterAgentServiceServer(srv *grpc.Server, service pb.AgentServiceServer) {
-	pb.RegisterAgentServiceServer(srv, service)
 }
 
 // getEnv retrieves an environment variable or returns a default value

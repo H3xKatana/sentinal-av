@@ -41,7 +41,7 @@ func (ac *AlertClient) SendAlert(alert Alert) error {
 	}
 
 	resp, err := ac.HTTPClient.Post(
-		ac.ServerURL+"/alert",
+		ac.ServerURL+"/alert", // ServerURL is expected to include the base path (e.g., http://localhost:3000/api), so this will be http://localhost:3000/api/alert
 		"application/json",
 		bytes.NewBuffer(jsonData),
 	)

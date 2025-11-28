@@ -51,6 +51,11 @@ func Migrate(db *gorm.DB) error {
 		return fmt.Errorf("failed to migrate threat model: %v", err)
 	}
 
+	err = db.AutoMigrate(&models.Command{})
+	if err != nil {
+		return fmt.Errorf("failed to migrate command model: %v", err)
+	}
+
 	// Create default admin user if not exists
 	var userCount int64
 	err = db.Model(&models.User{}).Count(&userCount).Error

@@ -1,4 +1,4 @@
-import { AlertTriangle, Shield, Archive } from "lucide-react";
+import { AlertTriangle, Shield, Archive, Loader2 } from "lucide-react";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -10,16 +10,12 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-
-const threats = [
-  { id: 1, name: "Trojan.GenericKD.123456", file: "C:\\Users\\Documents\\file.exe", severity: "high", detected: "2024-01-15 14:32", status: "quarantined" },
-  { id: 2, name: "Adware.BrowserHelper", file: "C:\\Program Files\\Extension\\helper.dll", severity: "medium", detected: "2024-01-15 09:18", status: "quarantined" },
-  { id: 3, name: "PUA.Unwanted.Tool", file: "C:\\Temp\\installer.msi", severity: "low", detected: "2024-01-14 16:25", status: "deleted" },
-  { id: 4, name: "Malware.Generic.789012", file: "C:\\Users\\Downloads\\update.exe", severity: "high", detected: "2024-01-12 11:45", status: "quarantined" },
-];
+import { useQuery } from "@tanstack/react-query";
+import { apiService, Threat } from "@/services/api";
 
 const getSeverityVariant = (severity: string) => {
   switch (severity) {
+    case "critical":
     case "high":
       return "destructive";
     case "medium":
@@ -32,6 +28,27 @@ const getSeverityVariant = (severity: string) => {
 };
 
 export default function Threats() {
+  // Fetch threats
+  const { data: threats, isLoading, error } = useQuery({
+    queryKey: ['threats'],
+    queryFn: () => apiService.getThreats(),
+    staleTime: 60000, // 1 minute
+  });
+
+  // Show loading state
+  if (isLoading) {
+    return (
+      <div className="flex items-center justify-center h-64">
+        <Loader2 className="h-8 w-8 animate-spin" />
+      </div>
+    );
+  }
+
+  // Calculate stats
+  const totalThreats = threats?.length || 0;
+  const quarantined = threats?.filter((threat: any) => threat.action_taken === "quarantined").length || 0;
+  const deleted = threats?.filter((threat: any) => threat.action_taken === "deleted").length || 0;
+
   return (
     <div className="space-y-6">
       <div>
@@ -46,7 +63,7 @@ export default function Threats() {
               <AlertTriangle className="h-6 w-6 text-destructive" />
             </div>
             <div>
-              <p className="text-2xl font-bold text-foreground">7</p>
+              <p className="text-2xl font-bold text-foreground">{totalThreats}</p>
               <p className="text-sm text-muted-foreground">Total Threats</p>
             </div>
           </div>
@@ -58,7 +75,7 @@ export default function Threats() {
               <Shield className="h-6 w-6 text-primary" />
             </div>
             <div>
-              <p className="text-2xl font-bold text-foreground">5</p>
+              <p className="text-2xl font-bold text-foreground">{quarantined}</p>
               <p className="text-sm text-muted-foreground">Quarantined</p>
             </div>
           </div>
@@ -70,7 +87,7 @@ export default function Threats() {
               <Archive className="h-6 w-6 text-primary" />
             </div>
             <div>
-              <p className="text-2xl font-bold text-foreground">2</p>
+              <p className="text-2xl font-bold text-foreground">{deleted}</p>
               <p className="text-sm text-muted-foreground">Deleted</p>
             </div>
           </div>
@@ -97,30 +114,40 @@ export default function Threats() {
             </TableRow>
           </TableHeader>
           <TableBody>
-            {threats.map((threat) => (
-              <TableRow key={threat.id}>
-                <TableCell className="font-medium">{threat.name}</TableCell>
-                <TableCell className="text-sm text-muted-foreground max-w-xs truncate">
-                  {threat.file}
-                </TableCell>
-                <TableCell>
-                  <Badge variant={getSeverityVariant(threat.severity)} className="capitalize">
-                    {threat.severity}
-                  </Badge>
-                </TableCell>
-                <TableCell className="text-sm">{threat.detected}</TableCell>
-                <TableCell>
-                  <Badge variant="outline" className="capitalize">
-                    {threat.status}
-                  </Badge>
-                </TableCell>
-                <TableCell>
-                  <Button variant="ghost" size="sm">
-                    Remove
-                  </Button>
+            {threats && threats.length > 0 ? (
+              threats.map((threat: any) => (
+                <TableRow key={threat.id}>
+                  <TableCell className="font-medium">{threat.threat_name || threat.name || 'Unknown'}</TableCell>
+                  <TableCell className="text-sm text-muted-foreground max-w-xs truncate">
+                    {threat.file_path || threat.file || 'Unknown'}
+                  </TableCell>
+                  <TableCell>
+                    <Badge variant={getSeverityVariant(threat.severity)} className="capitalize">
+                      {threat.severity}
+                    </Badge>
+                  </TableCell>
+                  <TableCell className="text-sm">
+                    {threat.created_at ? new Date(threat.created_at).toLocaleString() : 'N/A'}
+                  </TableCell>
+                  <TableCell>
+                    <Badge variant="outline" className="capitalize">
+                      {threat.action_taken || threat.status || 'detected'}
+                    </Badge>
+                  </TableCell>
+                  <TableCell>
+                    <Button variant="ghost" size="sm">
+                      Remove
+                    </Button>
+                  </TableCell>
+                </TableRow>
+              ))
+            ) : (
+              <TableRow>
+                <TableCell colSpan={6} className="text-center text-muted-foreground">
+                  No threats detected
                 </TableCell>
               </TableRow>
-            ))}
+            )}
           </TableBody>
         </Table>
       </Card>
